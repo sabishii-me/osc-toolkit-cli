@@ -1,0 +1,25 @@
+version = 1
+
+[[inputs]]
+id = "face-a"
+bind = "0.0.0.0:11111"
+mode = "passthrough"
+
+[[inputs]]
+id = "face-b"
+bind = "0.0.0.0:11112"
+mode = "osc"
+
+[[outputs]]
+id = "unreal-a"
+target = "127.0.0.1:12001"
+
+[[outputs]]
+id = "unreal-b"
+target = "127.0.0.1:12002"
+
+[[mapping_groups]]
+id = "face-pairs"
+from = ["face-a", "face-b"]
+to = ["unreal-a", "unreal-b"]
+mode = "zip"

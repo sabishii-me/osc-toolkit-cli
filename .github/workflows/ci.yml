@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --workspace --all-features
+
+  repository-language:
+    name: Repository language policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject CJK text in tracked files
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+          import sys
+
+          cjk_ranges = (
+              (0x3400, 0x4DBF),
+              (0x4E00, 0x9FFF),
+              (0xF900, 0xFAFF),
+              (0x20000, 0x2FA1F),
+          )
+
+          def contains_cjk(text: str) -> bool:
+              return any(
+                  start <= ord(char) <= end
+                  for char in text
+                  for start, end in cjk_ranges
+              )
+
+          failures = []
+          tracked = subprocess.check_output(
+              ["git", "ls-files", "-z"]
+          ).split(b"\0")
+          for raw_path in tracked:
+              if not raw_path:
+                  continue
+              path = Path(raw_path.decode())
+              try:
+                  text = path.read_text(encoding="utf-8")
+              except (UnicodeDecodeError, OSError):
+                  continue
+              for line_number, line in enumerate(text.splitlines(), 1):
+                  if contains_cjk(line):
+                      failures.append(f"{path}:{line_number}: {line}")
+
+          if failures:
+              print("Repository content must be written in English.")
+              print("\n".join(failures))
+              sys.exit(1)
+          PY

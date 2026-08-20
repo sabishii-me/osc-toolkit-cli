@@ -34,10 +34,10 @@ A capability may only move to **Complete** when its evidence column links to aut
 
 | ID | Capability | Phase | Status | Acceptance gate | Evidence |
 |---|---|---:|---|---|---|
-| SPEC-01 | Versioned TOML configuration contract | 0 | Planned | Normative schema defines IDs, endpoints, mappings, group expansion, defaults, errors, and versioning | — |
+| SPEC-01 | Versioned TOML configuration contract | 0 | Specifying | Normative schema defines IDs, endpoints, mappings, group expansion, defaults, errors, and versioning | [`docs/specs/configuration.md`](docs/specs/configuration.md) |
 | SPEC-02 | Reproducible performance methodology | 0 | Planned | Workloads cover passthrough, fan-out, convergence, recording, bursts, and soak; hardware/runtime context is recorded | — |
 | SPEC-03 | Binary recording format contract | 0 | Planned | Versioned layout, recovery rules, limits, checksums, index, and compatibility fixtures are specified before writer code | — |
-| FOUND-01 | Rust workspace and dependency boundaries | 0 | Planned | Workspace follows [`docs/architecture.md`](docs/architecture.md); dependency graph is acyclic | — |
+| FOUND-01 | Rust workspace and dependency boundaries | 0 | Implementing | Workspace follows [`docs/architecture.md`](docs/architecture.md); dependency graph is acyclic | [`Cargo.toml`](Cargo.toml) |
 | FOUND-02 | Stable error and exit-code model | 0 | Planned | Human and machine-readable failures are deterministic and tested | — |
 
 ### N:N UDP data plane
@@ -46,7 +46,7 @@ A capability may only move to **Complete** when its evidence column links to aut
 |---|---|---:|---|---|---|
 | ROUTE-01 | UDP IPv4/IPv6 unicast inputs and outputs | 1 | Planned | Bind/send integration tests pass on supported OS families | — |
 | ROUTE-02 | Arbitrary N:N endpoint mappings | 1 | Planned | Explicit fan-out, convergence, disconnected endpoints, and mixed topologies execute deterministically | — |
-| ROUTE-03 | Mapping groups: `all-to-all` and `zip` | 1 | Planned | Expansion, length validation, duplicate policy, and ordering match `SPEC-01` | — |
+| ROUTE-03 | Mapping groups: `all-to-all` and `zip` | 1 | Implementing | Expansion, length validation, duplicate policy, and ordering match `SPEC-01` | [`osc-config` tests](crates/osc-config/src/lib.rs) |
 | ROUTE-04 | Zero-decode passthrough | 1 | Planned | Raw payload is forwarded byte-identically without invoking OSC decode | — |
 | ROUTE-05 | Transactional startup and graceful shutdown | 1 | Planned | Invalid/partial startup exposes no running topology; shutdown drains according to documented bounds | — |
 | PERF-01 | Bounded packet buffers and queues | 1 | Planned | Burst and soak tests show bounded memory and observable overflow behavior | — |

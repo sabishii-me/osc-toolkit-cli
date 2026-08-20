@@ -20,6 +20,7 @@ The project is a **data-plane tool**. Task orchestration, process lifecycle mana
 - [Roadmap](ROADMAP.md) — delivery order, capability status, and acceptance gates
 - [Documentation index](docs/README.md) — sources of truth and maintenance rules
 - [Architecture](docs/architecture.md) — boundaries, dependency direction, and planned repository layout
+- [Configuration specification](docs/specs/configuration.md) — versioned endpoint and mapping schema
 - [VMC profile](docs/profiles/vmc.md) — scope of built-in VMC support
 
 ## Status

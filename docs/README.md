@@ -9,7 +9,7 @@ This directory separates normative specifications from delivery planning so the 
 | Product scope and delivery status | [`../ROADMAP.md`](../ROADMAP.md) | Capability IDs, phase gates, and current delivery state |
 | Component boundaries and dependencies | [`architecture.md`](architecture.md) | Stable architectural constraints and repository layout |
 | VMC support boundary | [`profiles/vmc.md`](profiles/vmc.md) | Normative scope for the built-in VMC profile |
-| Configuration schema | `specs/configuration.md` (Phase 0) | Normative user-facing configuration semantics |
+| Configuration schema | [`specs/configuration.md`](specs/configuration.md) | Normative user-facing configuration semantics |
 | Recording format | `specs/recording-format.md` (Phase 0) | Normative binary format and recovery rules |
 | CLI reference | Generated from the binary after Phase 1 | Commands, flags, defaults, and exit codes |
 | Actual behavior | Code and automated tests | Final authority when documentation disagrees with implementation |
@@ -50,7 +50,7 @@ docs/
 ├── profiles/
 │   └── vmc.md
 ├── specs/
-│   ├── configuration.md       # Phase 0
+│   ├── configuration.md
 │   └── recording-format.md    # Phase 0
 └── decisions/                 # Created only when a durable decision is needed
 ```
