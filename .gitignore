@@ -3,3 +3,4 @@
 *.profdata
 .DS_Store
 Thumbs.db
+runtime.*.log

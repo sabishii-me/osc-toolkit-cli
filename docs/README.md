@@ -13,6 +13,7 @@ This directory separates normative specifications from delivery planning so the 
 | Recording format | `specs/recording-format.md` (Phase 0) | Normative binary format and recovery rules |
 | CLI reference | Generated from the binary after Phase 1 | Commands, flags, defaults, and exit codes |
 | Actual behavior | Code and automated tests | Final authority when documentation disagrees with implementation |
+| Manual verification evidence | [`evidence/`](evidence/) | Reproducible smoke-test environment, procedure, observations, and scope |
 
 Files marked “Phase 0” must be created before the related implementation begins. Empty speculative documents should not be added.
 
@@ -49,6 +50,8 @@ docs/
 ├── architecture.md
 ├── profiles/
 │   └── vmc.md
+├── evidence/
+│   └── YYYY-MM-DD-test-name.md
 ├── specs/
 │   ├── configuration.md
 │   └── recording-format.md    # Phase 0

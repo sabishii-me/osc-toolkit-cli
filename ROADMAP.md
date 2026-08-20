@@ -44,10 +44,10 @@ A capability may only move to **Complete** when its evidence column links to aut
 
 | ID | Capability | Phase | Status | Acceptance gate | Evidence |
 |---|---|---:|---|---|---|
-| ROUTE-01 | UDP IPv4/IPv6 unicast inputs and outputs | 1 | Verifying | Bind/send integration tests pass on supported OS families | [`osc-runtime` tests](crates/osc-runtime/src/lib.rs) |
+| ROUTE-01 | UDP IPv4/IPv6 unicast inputs and outputs | 1 | Verifying | Bind/send integration tests pass on supported OS families | [`osc-runtime` tests](crates/osc-runtime/src/lib.rs), [live VMC smoke test](docs/evidence/2026-08-20-vmc-passthrough-smoke-test.md) |
 | ROUTE-02 | Arbitrary N:N endpoint mappings | 1 | Verifying | Explicit fan-out, convergence, disconnected endpoints, and mixed topologies execute deterministically | [`osc-runtime` tests](crates/osc-runtime/src/lib.rs) |
 | ROUTE-03 | Mapping groups: `all-to-all` and `zip` | 1 | Implementing | Expansion, length validation, duplicate policy, and ordering match `SPEC-01` | [`osc-config` tests](crates/osc-config/src/lib.rs) |
-| ROUTE-04 | Zero-decode passthrough | 1 | Verifying | Raw payload is forwarded byte-identically without invoking OSC decode | [`forwards_payload_byte_identically`](crates/osc-runtime/src/lib.rs) |
+| ROUTE-04 | Zero-decode passthrough | 1 | Verifying | Raw payload is forwarded byte-identically without invoking OSC decode | [`forwards_payload_byte_identically`](crates/osc-runtime/src/lib.rs), [live VMC smoke test](docs/evidence/2026-08-20-vmc-passthrough-smoke-test.md) |
 | ROUTE-05 | Transactional startup and graceful shutdown | 1 | Implementing | Invalid/partial startup exposes no running topology; shutdown drains according to documented bounds | [`osc-runtime` tests](crates/osc-runtime/src/lib.rs) |
 | PERF-01 | Bounded packet buffers and queues | 1 | Planned | Burst and soak tests show bounded memory and observable overflow behavior | — |
 | OBS-01 | Per-input, mapping, and output statistics | 1 | Planned | Counters and final summary are stable and machine-readable | — |
