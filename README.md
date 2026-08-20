@@ -21,6 +21,7 @@ The project is a **data-plane tool**. Task orchestration, process lifecycle mana
 - [Documentation index](docs/README.md) — sources of truth and maintenance rules
 - [Architecture](docs/architecture.md) — boundaries, dependency direction, and planned repository layout
 - [Configuration specification](docs/specs/configuration.md) — versioned endpoint and mapping schema
+- [VMC passthrough example](examples/vmc-passthrough.toml) — receive and forward a VMC OSC stream
 - [VMC profile](docs/profiles/vmc.md) — scope of built-in VMC support
 
 ## Status

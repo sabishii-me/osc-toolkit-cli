@@ -1,0 +1,17 @@
+version = 1
+
+# Change this port to the VMC sender's destination port.
+[[inputs]]
+id = "vmc-face-capture"
+bind = "0.0.0.0:39539"
+mode = "passthrough"
+
+# Change this endpoint to the application that should receive VMC.
+[[outputs]]
+id = "vmc-target"
+target = "127.0.0.1:39540"
+
+[[mappings]]
+id = "vmc-face-capture-to-target"
+from = "vmc-face-capture"
+to = "vmc-target"
