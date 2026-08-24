@@ -10,7 +10,7 @@ This directory separates normative specifications from delivery planning so the 
 | Component boundaries and dependencies | [`architecture.md`](architecture.md) | Stable architectural constraints and repository layout |
 | VMC support boundary | [`profiles/vmc.md`](profiles/vmc.md) | Normative scope for the built-in VMC profile |
 | Configuration schema | [`specs/configuration.md`](specs/configuration.md) | Normative user-facing configuration semantics |
-| Recording format | `specs/recording-format.md` (Phase 0) | Normative binary format and recovery rules |
+| Recording format | [`specs/recording-format.md`](specs/recording-format.md) | Normative binary format and recovery rules |
 | CLI reference | Generated from the binary after Phase 1 | Commands, flags, defaults, and exit codes |
 | Actual behavior | Code and automated tests | Final authority when documentation disagrees with implementation |
 | Manual verification evidence | [`evidence/`](evidence/) | Reproducible smoke-test environment, procedure, observations, and scope |
@@ -54,6 +54,6 @@ docs/
 │   └── YYYY-MM-DD-test-name.md
 ├── specs/
 │   ├── configuration.md
-│   └── recording-format.md    # Phase 0
+│   └── recording-format.md
 └── decisions/                 # Created only when a durable decision is needed
 ```

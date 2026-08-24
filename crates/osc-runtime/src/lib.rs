@@ -1,8 +1,15 @@
 //! Bounded-memory UDP routing runtime.
 
-use std::{future::Future, io, net::SocketAddr, sync::Arc};
+use std::{
+    future::Future,
+    io,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+};
 
 use osc_config::ValidatedConfig;
+use osc_recording::Writer;
 use thiserror::Error;
 use tokio::{net::UdpSocket, sync::watch, task::JoinSet};
 
@@ -35,6 +42,12 @@ pub enum RuntimeError {
         /// Underlying socket error.
         source: io::Error,
     },
+    /// Creating or writing the recording failed.
+    #[error(transparent)]
+    Recording(#[from] osc_recording::RecordingError),
+    /// A recording lock was poisoned by a failed task.
+    #[error("recording writer lock was poisoned")]
+    RecordingLock,
     /// Waiting for the requested shutdown signal failed.
     #[error("failed to wait for shutdown: {0}")]
     Shutdown(io::Error),
@@ -54,12 +67,14 @@ pub enum RuntimeError {
 /// A prepared runtime whose sockets have all been created successfully.
 pub struct Runtime {
     inputs: Vec<PreparedInput>,
+    recording: Option<Arc<Mutex<Writer>>>,
 }
 
 struct PreparedInput {
     id: String,
     socket: UdpSocket,
     destinations: Arc<[Destination]>,
+    recording: Option<Arc<Mutex<Writer>>>,
 }
 
 struct Destination {
@@ -78,6 +93,23 @@ impl Runtime {
     /// Returns [`RuntimeError`] when there are no inputs or a socket cannot be
     /// created.
     pub async fn prepare(config: ValidatedConfig) -> Result<Self, RuntimeError> {
+        Self::prepare_with_recording(config, None::<PathBuf>).await
+    }
+
+    /// Creates all sockets and optionally a new input-tap recording.
+    ///
+    /// The recording path must not already exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError`] when socket or recording preparation fails.
+    pub async fn prepare_with_recording(
+        config: ValidatedConfig,
+        recording_path: Option<impl AsRef<Path>>,
+    ) -> Result<Self, RuntimeError> {
+        let recording = recording_path
+            .map(|path| Writer::create(path).map(|writer| Arc::new(Mutex::new(writer))))
+            .transpose()?;
         if config.inputs.is_empty() {
             return Err(RuntimeError::NoInputs);
         }
@@ -123,10 +155,11 @@ impl Runtime {
                 id: input.id.to_string(),
                 socket,
                 destinations: destinations.into(),
+                recording: recording.clone(),
             });
         }
 
-        Ok(Self { inputs })
+        Ok(Self { inputs, recording })
     }
 
     /// Runs until shutdown is requested or an input task fails.
@@ -139,6 +172,7 @@ impl Runtime {
     where
         F: Future<Output = io::Result<()>> + Send,
     {
+        let recording = self.recording;
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let mut tasks = JoinSet::new();
 
@@ -180,6 +214,15 @@ impl Runtime {
                 }
             }
         }
+        if result.is_ok() {
+            if let Some(recording) = recording {
+                let writer = Arc::try_unwrap(recording)
+                    .map_err(|_| RuntimeError::RecordingLock)?
+                    .into_inner()
+                    .map_err(|_| RuntimeError::RecordingLock)?;
+                writer.finish()?;
+            }
+        }
         result
     }
 }
@@ -196,6 +239,13 @@ async fn run_input(input: &PreparedInput, shutdown: &mut watch::Receiver<bool>) 
             received = input.socket.recv_from(&mut buffer) => {
                 let (length, _) = received?;
                 let payload = &buffer[..length];
+                if let Some(recording) = &input.recording {
+                    recording
+                        .lock()
+                        .map_err(|_| io::Error::other("recording writer lock was poisoned"))?
+                        .write_datagram(&input.id, payload)
+                        .map_err(io::Error::other)?;
+                }
                 for destination in input.destinations.iter() {
                     destination.socket.send_to(payload, destination.target).await?;
                 }
@@ -209,6 +259,7 @@ mod tests {
     use std::time::Duration;
 
     use osc_config::parse_and_validate;
+    use osc_recording::read_all;
     use tokio::{net::UdpSocket, sync::oneshot, time::timeout};
 
     use super::{Runtime, RuntimeError};
@@ -354,6 +405,44 @@ mod tests {
         task.await
             .expect("runtime task should not panic")
             .expect("runtime should stop cleanly");
+    }
+
+    #[tokio::test]
+    async fn records_input_datagrams_with_stream_identity() {
+        let input = free_address().await;
+        let path =
+            std::env::temp_dir().join(format!("osc-runtime-recording-{}.oscr", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let config = parse_and_validate(&format!(
+            "version = 1\n[[inputs]]\nid = \"vmc-face\"\nbind = \"{input}\"\n"
+        ))
+        .expect("configuration should be valid");
+        let runtime = Runtime::prepare_with_recording(config, Some(&path))
+            .await
+            .expect("runtime should prepare");
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let task = tokio::spawn(runtime.run_until(async {
+            let _ = stop_rx.await;
+            Ok(())
+        }));
+        let sender = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("sender should bind");
+        sender
+            .send_to(b"recorded-vmc", input)
+            .await
+            .expect("datagram should send");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let _ = stop_tx.send(());
+        task.await
+            .expect("runtime task should not panic")
+            .expect("runtime should stop cleanly");
+
+        let (_, records) = read_all(&path).expect("recording should be readable");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].stream_id, "vmc-face");
+        assert_eq!(records[0].payload, b"recorded-vmc");
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]

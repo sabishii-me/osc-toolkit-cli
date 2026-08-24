@@ -10,6 +10,7 @@ authors.workspace = true
 
 [dependencies]
 osc-config = { path = "../osc-config" }
+osc-recording = { path = "../osc-recording" }
 thiserror.workspace = true
 tokio.workspace = true
 

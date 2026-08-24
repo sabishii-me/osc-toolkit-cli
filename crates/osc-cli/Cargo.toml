@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 osc-config = { path = "../osc-config" }
+osc-recording = { path = "../osc-recording" }
 osc-runtime = { path = "../osc-runtime" }
 thiserror.workspace = true
 tokio.workspace = true

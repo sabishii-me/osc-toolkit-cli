@@ -36,7 +36,7 @@ A capability may only move to **Complete** when its evidence column links to aut
 |---|---|---:|---|---|---|
 | SPEC-01 | Versioned TOML configuration contract | 0 | Specifying | Normative schema defines IDs, endpoints, mappings, group expansion, defaults, errors, and versioning | [`docs/specs/configuration.md`](docs/specs/configuration.md) |
 | SPEC-02 | Reproducible performance methodology | 0 | Planned | Workloads cover passthrough, fan-out, convergence, recording, bursts, and soak; hardware/runtime context is recorded | — |
-| SPEC-03 | Binary recording format contract | 0 | Planned | Versioned layout, recovery rules, limits, checksums, index, and compatibility fixtures are specified before writer code | — |
+| SPEC-03 | Binary recording format contract | 0 | Specifying | Versioned layout, recovery rules, limits, checksums, index, and compatibility fixtures are specified before writer code | [`docs/specs/recording-format.md`](docs/specs/recording-format.md) |
 | FOUND-01 | Rust workspace and dependency boundaries | 0 | Implementing | Workspace follows [`docs/architecture.md`](docs/architecture.md); dependency graph is acyclic | [`Cargo.toml`](Cargo.toml) |
 | FOUND-02 | Stable error and exit-code model | 0 | Planned | Human and machine-readable failures are deterministic and tested | — |
 
@@ -57,12 +57,12 @@ A capability may only move to **Complete** when its evidence column links to aut
 
 | ID | Capability | Phase | Status | Acceptance gate | Evidence |
 |---|---|---:|---|---|---|
-| REC-01 | Chunked raw-datagram writer | 2 | Planned | Sequential writer follows `SPEC-03`, uses bounded memory, and passes format fixtures | — |
-| REC-02 | Input, mapping, and output recording taps | 2 | Planned | Tap identity and pre/post-processing semantics are unambiguous and tested | — |
-| REC-03 | Record-only and record-and-forward modes | 2 | Planned | Both modes share writer semantics and expose loss/backpressure counters | — |
-| REC-04 | CRC32C validation and crash recovery | 2 | Planned | Forced termination recovers through the final complete chunk without requiring a footer | — |
+| REC-01 | Chunked raw-datagram writer | 2 | Implementing | Sequential writer follows `SPEC-03`, uses bounded memory, and passes format fixtures | [`osc-recording` tests](crates/osc-recording/src/lib.rs) |
+| REC-02 | Input, mapping, and output recording taps | 2 | Implementing | Tap identity and pre/post-processing semantics are unambiguous and tested | [input tap runtime test](crates/osc-runtime/src/lib.rs) |
+| REC-03 | Record-only and record-and-forward modes | 2 | Implementing | Both modes share writer semantics and expose loss/backpressure counters | [input tap runtime test](crates/osc-runtime/src/lib.rs) |
+| REC-04 | CRC32C validation and crash recovery | 2 | Implementing | Forced termination recovers through the final complete chunk without requiring a footer | [`osc-recording` tests](crates/osc-recording/src/lib.rs) |
 | REC-05 | Sparse index, inspect, verify, and repair | 2 | Planned | Large files can seek and rebuild indexes within documented resource bounds | — |
-| REPLAY-01 | Timed and fastest-possible replay | 2 | Planned | Order is exact and timing error is measured against an accepted tolerance | — |
+| REPLAY-01 | Timed and fastest-possible replay | 2 | Implementing | Order is exact and timing error is measured against an accepted tolerance | [CLI replay test](crates/osc-cli/tests/replay.rs) |
 | REPLAY-02 | Speed, range, seek, loop, and stream selection | 2 | Planned | CLI integration tests cover combinations and invalid ranges | — |
 | PERF-02 | Recorder backpressure policies | 2 | Planned | `drop-recording`, `block`, and `fail` behavior is bounded, documented, and stress-tested | — |
 
