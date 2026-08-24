@@ -3,9 +3,13 @@ use std::{net::SocketAddr, path::PathBuf, process::ExitCode, time::Duration};
 use clap::{Parser, Subcommand};
 use osc_config::load_and_validate;
 use osc_recording::{read_all, replay_delay};
-use osc_runtime::Runtime;
+use osc_runtime::{RecordingController, RecordingStatus, Runtime};
 use thiserror::Error;
-use tokio::{net::UdpSocket, time::sleep};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::{TcpListener, TcpStream, UdpSocket},
+    time::sleep,
+};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -20,30 +24,47 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Validate a configuration file without starting any sockets.
+    /// Validate a configuration file without starting sockets.
     Validate {
-        /// Path to the TOML configuration file.
         #[arg(short, long)]
         config: PathBuf,
     },
-    /// Run the configured UDP routing topology until interrupted.
-    Run {
-        /// Path to the TOML configuration file.
+    /// Keep data sockets ready and expose a local recording control endpoint.
+    Serve {
         #[arg(short, long)]
         config: PathBuf,
-        /// Create a timestamped input-tap recording at this path.
-        #[arg(long)]
-        record: Option<PathBuf>,
+        #[arg(long, default_value = "127.0.0.1:7012")]
+        control: SocketAddr,
     },
-    /// Replay a recording to one UDP target using recorded timing.
+    /// Control recording on an already running service.
+    Record {
+        #[arg(long, default_value = "127.0.0.1:7012")]
+        control: SocketAddr,
+        #[command(subcommand)]
+        action: RecordAction,
+    },
+    /// Replay a finalized recording using recorded timing.
     Replay {
-        /// Recording file to replay.
         #[arg(short, long)]
         file: PathBuf,
-        /// Numeric IPv4 or bracketed IPv6 UDP destination.
         #[arg(short, long)]
         target: SocketAddr,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum RecordAction {
+    /// Start recording immediately to a new file.
+    Start {
+        #[arg(short, long)]
+        file: PathBuf,
+    },
+    /// Stop immediately and wait until the file is durable.
+    Stop,
+    /// Report current recording state.
+    Status,
+    /// Stop the service after finalizing any active recording.
+    Shutdown,
 }
 
 #[derive(Debug, Error)]
@@ -54,6 +75,10 @@ enum CliError {
     Runtime(#[from] osc_runtime::RuntimeError),
     #[error(transparent)]
     Recording(#[from] osc_recording::RecordingError),
+    #[error("control operation failed: {0}")]
+    ControlIo(std::io::Error),
+    #[error("control service rejected the command: {0}")]
+    ControlRejected(String),
     #[error("replay UDP operation failed: {0}")]
     ReplayIo(std::io::Error),
 }
@@ -80,26 +105,116 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 validated.mappings.len()
             );
         }
-        Command::Run { config, record } => {
-            let validated = load_and_validate(&config)?;
-            let input_count = validated.inputs.len();
-            let output_count = validated.outputs.len();
-            let mapping_count = validated.mappings.len();
-            let runtime = Runtime::prepare_with_recording(validated, record.as_ref()).await?;
-            if let Some(path) = &record {
-                println!("Recording input datagrams to {}", path.display());
-            }
-            println!(
-                "Routing started: {input_count} inputs, {output_count} outputs, {mapping_count} mappings"
-            );
-            runtime.run_until(tokio::signal::ctrl_c()).await?;
-            println!("Routing stopped");
+        Command::Serve { config, control } => serve(config, control).await?,
+        Command::Record { control, action } => {
+            let command = match action {
+                RecordAction::Start { file } => format!("START {}", file.display()),
+                RecordAction::Stop => "STOP".to_owned(),
+                RecordAction::Status => "STATUS".to_owned(),
+                RecordAction::Shutdown => "SHUTDOWN".to_owned(),
+            };
+            println!("{}", send_control(control, &command).await?);
         }
-        Command::Replay { file, target } => {
-            replay(&file, target).await?;
-        }
+        Command::Replay { file, target } => replay(&file, target).await?,
     }
     Ok(())
+}
+
+async fn serve(config: PathBuf, control_address: SocketAddr) -> Result<(), CliError> {
+    let validated = load_and_validate(&config)?;
+    let input_count = validated.inputs.len();
+    let (runtime, recorder) = Runtime::prepare_controlled(validated).await?;
+    let listener = TcpListener::bind(control_address)
+        .await
+        .map_err(CliError::ControlIo)?;
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let runtime_task = tokio::spawn(runtime.run_until(async {
+        let _ = shutdown_rx.await;
+        Ok(())
+    }));
+    println!("READY inputs={input_count} control={control_address}");
+
+    loop {
+        let (stream, _) = listener.accept().await.map_err(CliError::ControlIo)?;
+        if handle_control(stream, &recorder).await? {
+            break;
+        }
+    }
+
+    let _ = shutdown_tx.send(());
+    runtime_task
+        .await
+        .map_err(osc_runtime::RuntimeError::TaskJoin)??;
+    println!("SHUTDOWN complete");
+    Ok(())
+}
+
+async fn handle_control(
+    stream: TcpStream,
+    recorder: &RecordingController,
+) -> Result<bool, CliError> {
+    let (reader, mut writer) = stream.into_split();
+    let mut lines = BufReader::new(reader).lines();
+    let Some(line) = lines.next_line().await.map_err(CliError::ControlIo)? else {
+        return Ok(false);
+    };
+    let line = line.trim();
+    let (command, argument) = line.split_once(' ').map_or((line, ""), |parts| parts);
+    let (response, shutdown) = match command.to_ascii_uppercase().as_str() {
+        "START" if !argument.trim().is_empty() => match recorder.start(argument.trim()) {
+            Ok(()) => (format!("RECORDING file={}", argument.trim()), false),
+            Err(error) => (format!("ERROR {error}"), false),
+        },
+        "STOP" => match recorder.stop() {
+            Ok((path, records)) => (
+                format!("FINALIZED file={} records={records}", path.display()),
+                false,
+            ),
+            Err(error) => (format!("ERROR {error}"), false),
+        },
+        "STATUS" => match recorder.status()? {
+            RecordingStatus::Idle => ("STATUS idle".to_owned(), false),
+            RecordingStatus::Recording(path) => {
+                (format!("STATUS recording file={}", path.display()), false)
+            }
+        },
+        "SHUTDOWN" => {
+            if matches!(recorder.status()?, RecordingStatus::Recording(_)) {
+                recorder.stop()?;
+            }
+            ("SHUTDOWN accepted".to_owned(), true)
+        }
+        _ => (
+            "ERROR expected START <file>, STOP, STATUS, or SHUTDOWN".to_owned(),
+            false,
+        ),
+    };
+    writer
+        .write_all(format!("{response}\n").as_bytes())
+        .await
+        .map_err(CliError::ControlIo)?;
+    writer.shutdown().await.map_err(CliError::ControlIo)?;
+    Ok(shutdown)
+}
+
+async fn send_control(address: SocketAddr, command: &str) -> Result<String, CliError> {
+    let mut stream = TcpStream::connect(address)
+        .await
+        .map_err(CliError::ControlIo)?;
+    stream
+        .write_all(format!("{command}\n").as_bytes())
+        .await
+        .map_err(CliError::ControlIo)?;
+    let mut response = String::new();
+    BufReader::new(stream)
+        .read_line(&mut response)
+        .await
+        .map_err(CliError::ControlIo)?;
+    let response = response.trim().to_owned();
+    if let Some(reason) = response.strip_prefix("ERROR ") {
+        return Err(CliError::ControlRejected(reason.to_owned()));
+    }
+    Ok(response)
 }
 
 async fn replay(file: &std::path::Path, target: SocketAddr) -> Result<(), CliError> {

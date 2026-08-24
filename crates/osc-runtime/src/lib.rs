@@ -42,6 +42,12 @@ pub enum RuntimeError {
         /// Underlying socket error.
         source: io::Error,
     },
+    /// A recording is already active.
+    #[error("a recording is already active at `{0}`")]
+    RecordingActive(PathBuf),
+    /// No recording is active.
+    #[error("no recording is active")]
+    RecordingInactive,
     /// Creating or writing the recording failed.
     #[error(transparent)]
     Recording(#[from] osc_recording::RecordingError),
@@ -67,14 +73,80 @@ pub enum RuntimeError {
 /// A prepared runtime whose sockets have all been created successfully.
 pub struct Runtime {
     inputs: Vec<PreparedInput>,
-    recording: Option<Arc<Mutex<Writer>>>,
+    recorder: RecordingController,
 }
 
 struct PreparedInput {
     id: String,
     socket: UdpSocket,
     destinations: Arc<[Destination]>,
-    recording: Option<Arc<Mutex<Writer>>>,
+    recorder: RecordingController,
+}
+
+#[derive(Clone)]
+pub struct RecordingController {
+    state: Arc<Mutex<RecordingState>>,
+}
+
+struct RecordingState {
+    active: Option<ActiveRecording>,
+}
+struct ActiveRecording {
+    path: PathBuf,
+    writer: Writer,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RecordingStatus {
+    Idle,
+    Recording(PathBuf),
+}
+
+impl RecordingController {
+    /// Starts a recording without rebinding any input sockets.
+    ///
+    /// # Errors
+    /// Returns an error if recording is active or the file cannot be created.
+    pub fn start(&self, path: impl AsRef<Path>) -> Result<(), RuntimeError> {
+        let path = path.as_ref().to_path_buf();
+        let mut state = self.state.lock().map_err(|_| RuntimeError::RecordingLock)?;
+        if let Some(active) = &state.active {
+            return Err(RuntimeError::RecordingActive(active.path.clone()));
+        }
+        let writer = Writer::create(&path)?;
+        state.active = Some(ActiveRecording { path, writer });
+        Ok(())
+    }
+
+    /// Stops the active recording and durably synchronizes its file.
+    ///
+    /// # Errors
+    /// Returns an error if recording is idle or finalization fails.
+    pub fn stop(&self) -> Result<(PathBuf, u64), RuntimeError> {
+        let active = self
+            .state
+            .lock()
+            .map_err(|_| RuntimeError::RecordingLock)?
+            .active
+            .take()
+            .ok_or(RuntimeError::RecordingInactive)?;
+        let records = active.writer.finish()?;
+        Ok((active.path, records))
+    }
+
+    /// Reports whether recording is idle or active.
+    ///
+    /// # Errors
+    /// Returns an error if the recorder state lock is unavailable.
+    pub fn status(&self) -> Result<RecordingStatus, RuntimeError> {
+        let state = self.state.lock().map_err(|_| RuntimeError::RecordingLock)?;
+        Ok(state
+            .active
+            .as_ref()
+            .map_or(RecordingStatus::Idle, |active| {
+                RecordingStatus::Recording(active.path.clone())
+            }))
+    }
 }
 
 struct Destination {
@@ -93,23 +165,20 @@ impl Runtime {
     /// Returns [`RuntimeError`] when there are no inputs or a socket cannot be
     /// created.
     pub async fn prepare(config: ValidatedConfig) -> Result<Self, RuntimeError> {
-        Self::prepare_with_recording(config, None::<PathBuf>).await
+        let (runtime, _) = Self::prepare_controlled(config).await?;
+        Ok(runtime)
     }
 
-    /// Creates all sockets and optionally a new input-tap recording.
-    ///
-    /// The recording path must not already exist.
+    /// Binds all sockets and returns an independently controlled recorder.
     ///
     /// # Errors
-    ///
-    /// Returns [`RuntimeError`] when socket or recording preparation fails.
-    pub async fn prepare_with_recording(
+    /// Returns an error if no input exists or a socket cannot be prepared.
+    pub async fn prepare_controlled(
         config: ValidatedConfig,
-        recording_path: Option<impl AsRef<Path>>,
-    ) -> Result<Self, RuntimeError> {
-        let recording = recording_path
-            .map(|path| Writer::create(path).map(|writer| Arc::new(Mutex::new(writer))))
-            .transpose()?;
+    ) -> Result<(Self, RecordingController), RuntimeError> {
+        let recorder = RecordingController {
+            state: Arc::new(Mutex::new(RecordingState { active: None })),
+        };
         if config.inputs.is_empty() {
             return Err(RuntimeError::NoInputs);
         }
@@ -155,11 +224,17 @@ impl Runtime {
                 id: input.id.to_string(),
                 socket,
                 destinations: destinations.into(),
-                recording: recording.clone(),
+                recorder: recorder.clone(),
             });
         }
 
-        Ok(Self { inputs, recording })
+        Ok((
+            Self {
+                inputs,
+                recorder: recorder.clone(),
+            },
+            recorder,
+        ))
     }
 
     /// Runs until shutdown is requested or an input task fails.
@@ -172,7 +247,7 @@ impl Runtime {
     where
         F: Future<Output = io::Result<()>> + Send,
     {
-        let recording = self.recording;
+        let recorder = self.recorder;
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let mut tasks = JoinSet::new();
 
@@ -214,14 +289,8 @@ impl Runtime {
                 }
             }
         }
-        if result.is_ok() {
-            if let Some(recording) = recording {
-                let writer = Arc::try_unwrap(recording)
-                    .map_err(|_| RuntimeError::RecordingLock)?
-                    .into_inner()
-                    .map_err(|_| RuntimeError::RecordingLock)?;
-                writer.finish()?;
-            }
+        if result.is_ok() && matches!(recorder.status()?, RecordingStatus::Recording(_)) {
+            recorder.stop()?;
         }
         result
     }
@@ -239,12 +308,12 @@ async fn run_input(input: &PreparedInput, shutdown: &mut watch::Receiver<bool>) 
             received = input.socket.recv_from(&mut buffer) => {
                 let (length, _) = received?;
                 let payload = &buffer[..length];
-                if let Some(recording) = &input.recording {
-                    recording
-                        .lock()
-                        .map_err(|_| io::Error::other("recording writer lock was poisoned"))?
-                        .write_datagram(&input.id, payload)
-                        .map_err(io::Error::other)?;
+                {
+                    let mut state = input.recorder.state.lock()
+                        .map_err(|_| io::Error::other("recording writer lock was poisoned"))?;
+                    if let Some(active) = &mut state.active {
+                        active.writer.write_datagram(&input.id, payload).map_err(io::Error::other)?;
+                    }
                 }
                 for destination in input.destinations.iter() {
                     destination.socket.send_to(payload, destination.target).await?;
@@ -417,9 +486,10 @@ mod tests {
             "version = 1\n[[inputs]]\nid = \"vmc-face\"\nbind = \"{input}\"\n"
         ))
         .expect("configuration should be valid");
-        let runtime = Runtime::prepare_with_recording(config, Some(&path))
+        let (runtime, recorder) = Runtime::prepare_controlled(config)
             .await
             .expect("runtime should prepare");
+        recorder.start(&path).expect("recording should start");
         let (stop_tx, stop_rx) = oneshot::channel();
         let task = tokio::spawn(runtime.run_until(async {
             let _ = stop_rx.await;

@@ -2,7 +2,7 @@ use std::{
     fs,
     net::UdpSocket,
     path::PathBuf,
-    process::{Child, Command, Stdio},
+    process::{Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -50,10 +50,10 @@ fn wait_for_forwarding(sender: &UdpSocket, receiver: &UdpSocket, input: std::net
     }
 }
 
-fn stop_child(mut child: Child) {
-    child.kill().expect("test process should stop");
-    let status = child.wait().expect("test process should be reaped");
-    assert!(!status.success(), "forced test shutdown should be non-zero");
+fn stop_child(mut child: std::process::Child) {
+    child.kill().expect("test service should stop");
+    let status = child.wait().expect("test service should be reaped");
+    assert!(!status.success(), "forced test cleanup should be non-zero");
 }
 
 #[test]
@@ -70,8 +70,9 @@ fn run_command_forwards_udp_datagrams() {
     ));
 
     let child = Command::new(env!("CARGO_BIN_EXE_osc-toolkit"))
-        .args(["run", "--config"])
+        .args(["serve", "--config"])
         .arg(&config)
+        .args(["--control", &free_address().to_string()])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

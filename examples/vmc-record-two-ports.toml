@@ -1,0 +1,11 @@
+version = 1
+
+[[inputs]]
+id = "vmc-port-39539"
+bind = "0.0.0.0:39539"
+mode = "passthrough"
+
+[[inputs]]
+id = "vmc-port-39540"
+bind = "0.0.0.0:39540"
+mode = "passthrough"
