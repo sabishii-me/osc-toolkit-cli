@@ -47,8 +47,10 @@ enum Command {
     Replay {
         #[arg(short, long)]
         file: PathBuf,
-        #[arg(short, long)]
-        target: SocketAddr,
+        /// Destination(s). Pass more than once to send EVERY datagram to EACH target - one
+        /// recording fans out to many receivers with the recorded timing preserved.
+        #[arg(short, long, required = true)]
+        target: Vec<SocketAddr>,
     },
 }
 
@@ -115,7 +117,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             };
             println!("{}", send_control(control, &command).await?);
         }
-        Command::Replay { file, target } => replay(&file, target).await?,
+        Command::Replay { file, target } => replay(&file, &target).await?,
     }
     Ok(())
 }
@@ -217,33 +219,53 @@ async fn send_control(address: SocketAddr, command: &str) -> Result<String, CliE
     Ok(response)
 }
 
-async fn replay(file: &std::path::Path, target: SocketAddr) -> Result<(), CliError> {
+async fn replay(file: &std::path::Path, targets: &[SocketAddr]) -> Result<(), CliError> {
     let (metadata, records) = read_all(file)?;
-    let bind = if target.is_ipv4() {
-        "0.0.0.0:0"
-    } else {
-        "[::]:0"
-    };
-    let socket = UdpSocket::bind(bind).await.map_err(CliError::ReplayIo)?;
+    // One socket serves every target. Bind the family of the FIRST target; a mixed-family target list is
+    // rejected rather than silently sending to only part of it.
+    let first_v4 = targets[0].is_ipv4();
+    if targets.iter().any(|target| target.is_ipv4() != first_v4) {
+        return Err(CliError::ReplayIo(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "all --target addresses must use the same address family",
+        )));
+    }
+    let socket = UdpSocket::bind(if first_v4 { "0.0.0.0:0" } else { "[::]:0" })
+        .await
+        .map_err(CliError::ReplayIo)?;
+    let destinations = targets
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
     println!(
-        "Replaying {} datagrams from {} to {} (recording start Unix ns: {})",
+        "Replaying {} datagrams from {} to {} target(s): {} (recording start Unix ns: {})",
         records.len(),
         file.display(),
-        target,
+        targets.len(),
+        destinations,
         metadata.start_unix_ns
     );
     let mut previous = records.first().map_or(0, |record| record.offset_ns);
     for record in &records {
+        // The recorded TIMING is preserved once, then the datagram fans out to every target in turn, so all
+        // receivers see the same frame at the same moment.
         let delay = replay_delay(previous, record.offset_ns);
         if delay > Duration::ZERO {
             sleep(delay).await;
         }
-        socket
-            .send_to(&record.payload, target)
-            .await
-            .map_err(CliError::ReplayIo)?;
+        for target in targets {
+            socket
+                .send_to(&record.payload, target)
+                .await
+                .map_err(CliError::ReplayIo)?;
+        }
         previous = record.offset_ns;
     }
-    println!("Replay complete: {} datagrams", records.len());
+    println!(
+        "Replay complete: {} datagrams x {} target(s)",
+        records.len(),
+        targets.len()
+    );
     Ok(())
 }
