@@ -1,0 +1,86 @@
+name: Release
+
+# Builds and publishes the Windows x86_64 CLI bundle on a version tag.
+# The Project CUE tree imports the release binary produced here, byte-for-byte.
+#
+# Trigger: push a tag matching v*.*.* (e.g. v0.2.0).
+# The tag MUST match Cargo.toml's [workspace.package].version, or the job fails.
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (must match Cargo.toml version, e.g. v0.2.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Windows x86_64 release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Resolve version
+        id: v
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          cargo_version="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+          if [ "v${cargo_version}" != "${tag}" ]; then
+            echo "Tag ${tag} does not match Cargo.toml version v${cargo_version}" >&2
+            exit 1
+          fi
+          echo "version=${cargo_version}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release --locked -p osc-cli
+
+      - name: Package bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.v.outputs.version }}"
+          name="osc-toolkit-cli-v${version}-windows-x86_64"
+          mkdir -p dist
+          cp target/release/osc-toolkit.exe dist/
+          cp -r examples dist/
+          cp README.md dist/
+          ( cd dist && 7z a "../${name}.zip" . >/dev/null )
+          sum="$(sha256sum "${name}.zip" | cut -d' ' -f1 | tr '[:lower:]' '[:upper:]')"
+          printf '%s  %s\n' "${sum}" "${name}.zip" > "${name}.zip.sha256"
+          ls -la "${name}".zip*
+
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="${{ steps.v.outputs.version }}"
+          tag="${{ steps.v.outputs.tag }}"
+          name="osc-toolkit-cli-v${version}-windows-x86_64"
+          prerelease_flag=""
+          case "${version}" in
+            *-*) prerelease_flag="--prerelease" ;;
+          esac
+          gh release create "${tag}" \
+            --title "${tag}" \
+            --generate-notes \
+            ${prerelease_flag} \
+            "${name}.zip" \
+            "${name}.zip.sha256"
