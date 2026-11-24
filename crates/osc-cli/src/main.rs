@@ -120,7 +120,11 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             };
             println!("{}", send_control(control, &command).await?);
         }
-        Command::Replay { file, target, r#loop } => replay(&file, &target, r#loop).await?,
+        Command::Replay {
+            file,
+            target,
+            r#loop,
+        } => replay(&file, &target, r#loop).await?,
     }
     Ok(())
 }
@@ -233,7 +237,11 @@ async fn send_control(address: SocketAddr, command: &str) -> Result<String, CliE
 /// consecutive recorded offsets before each send. A repeated pass restarts from the first record; because a
 /// pass has already slept the recording's own span (first offset to last offset), restarting reproduces the
 /// recorded cadence without inventing a trailing hold.
-async fn replay(file: &std::path::Path, targets: &[SocketAddr], repeat: bool) -> Result<(), CliError> {
+async fn replay(
+    file: &std::path::Path,
+    targets: &[SocketAddr],
+    repeat: bool,
+) -> Result<(), CliError> {
     let (metadata, records) = read_all(file)?;
 
     // One socket serves every target, so bind the address family the targets share. A list that mixes
@@ -249,7 +257,11 @@ async fn replay(file: &std::path::Path, targets: &[SocketAddr], repeat: bool) ->
         .await
         .map_err(CliError::ReplayIo)?;
 
-    let destinations = targets.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
+    let destinations = targets
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
     println!(
         "Replaying {} datagrams from {} to {} target(s): {} (recording start Unix ns: {})",
         records.len(),
@@ -294,4 +306,3 @@ async fn replay(file: &std::path::Path, targets: &[SocketAddr], repeat: bool) ->
     );
     Ok(())
 }
-
