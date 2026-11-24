@@ -4,7 +4,30 @@ A cross-platform Rust CLI for high-throughput, bounded-memory UDP/OSC routing, f
 
 The project is a **data-plane tool**. Task orchestration, process lifecycle management, configuration deployment, and multi-instance coordination belong to an external orchestration engine.
 
-## Planned capabilities
+## Capabilities
+
+Available in 0.2.0 (Windows x86_64 builds on the
+[releases page](https://github.com/sabishii-me/osc-toolkit-cli/releases)):
+
+- `validate`: check a configuration file without opening sockets.
+- `serve`: N:N UDP passthrough with a local TCP control endpoint for recording.
+- `record start | stop | status | shutdown`: control recording on a running
+  `serve` without restarting its listeners.
+- `replay`: replay a recording with its recorded timing, to one or more
+  `--target`s (fan-out), optionally with `--loop`.
+- Recordings use the crash-recoverable [binary format](docs/specs/recording-format.md)
+  (`OSCTKREC`, CRC32C per datagram, no footer required).
+
+```text
+osc-toolkit serve --config examples/vmc-passthrough.toml --control 127.0.0.1:7012
+osc-toolkit record --control 127.0.0.1:7012 start --file take-001.oscr
+osc-toolkit record --control 127.0.0.1:7012 stop
+osc-toolkit replay --file take-001.oscr --target 127.0.0.1:39539
+```
+
+The project is early. Status per capability is tracked in the [Roadmap](ROADMAP.md).
+
+### Planned
 
 - Arbitrary N:N UDP input/output mappings
 - Zero-decode passthrough when OSC processing is not requested
@@ -25,6 +48,6 @@ The project is a **data-plane tool**. Task orchestration, process lifecycle mana
 - [VMC passthrough example](examples/vmc-passthrough.toml) — receive and forward a VMC OSC stream
 - [VMC profile](docs/profiles/vmc.md) — scope of built-in VMC support
 
-## Status
+## License
 
-Planning. No Rust implementation has been started.
+[MIT](LICENSE)
