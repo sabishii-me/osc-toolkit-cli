@@ -63,7 +63,7 @@ A capability may only move to **Complete** when its evidence column links to aut
 | REC-04 | CRC32C validation and crash recovery | 2 | Implementing | Forced termination recovers through the final complete chunk without requiring a footer | [`osc-recording` tests](crates/osc-recording/src/lib.rs) |
 | REC-05 | Sparse index, inspect, verify, and repair | 2 | Planned | Large files can seek and rebuild indexes within documented resource bounds | — |
 | REPLAY-01 | Timed and fastest-possible replay | 2 | Implementing | Order is exact and timing error is measured against an accepted tolerance | [CLI replay test](crates/osc-cli/tests/replay.rs) |
-| REPLAY-02 | Speed, range, seek, loop, and stream selection | 2 | Planned | CLI integration tests cover combinations and invalid ranges | — |
+| REPLAY-02 | Speed, range, seek, loop, and stream selection | 2 | Implementing | CLI integration tests cover combinations and invalid ranges | [CLI replay tests](crates/osc-cli/tests/replay.rs) (`--loop`, per-stream `--route`) |
 | PERF-02 | Recorder backpressure policies | 2 | Planned | `drop-recording`, `block`, and `fail` behavior is bounded, documented, and stress-tested | — |
 
 ### Generic OSC processing

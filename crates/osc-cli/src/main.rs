@@ -48,9 +48,15 @@ enum Command {
         #[arg(short, long)]
         file: PathBuf,
         /// Destination(s). Pass more than once to send EVERY datagram to EACH target - one
-        /// recording fans out to many receivers with the recorded timing preserved.
-        #[arg(short, long, required = true)]
+        /// recording fans out to many receivers with the recorded timing preserved. With
+        /// `--route`, targets receive only the streams that have no route.
+        #[arg(short, long, required_unless_present = "route")]
         target: Vec<SocketAddr>,
+        /// Per-stream destination as `STREAM=ADDRESS` (repeatable; a stream may have several).
+        /// Datagrams of a routed stream go only to its routes, so streams recorded from
+        /// different ports can be replayed back to different receivers.
+        #[arg(long, value_parser = parse_route)]
+        route: Vec<(String, SocketAddr)>,
         /// Repeat the recording until stopped, instead of ending after one pass.
         #[arg(long, default_value_t = false)]
         r#loop: bool,
@@ -123,8 +129,9 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Command::Replay {
             file,
             target,
+            route,
             r#loop,
-        } => replay(&file, &target, r#loop).await?,
+        } => replay(&file, &target, &route, r#loop).await?,
     }
     Ok(())
 }
@@ -226,12 +233,46 @@ async fn send_control(address: SocketAddr, command: &str) -> Result<String, CliE
     Ok(response)
 }
 
+/// Parses `STREAM=ADDRESS`. The split is at the LAST `=`, so stream IDs may contain `=`.
+fn parse_route(value: &str) -> Result<(String, SocketAddr), String> {
+    let (stream, address) = value
+        .rsplit_once('=')
+        .ok_or_else(|| format!("expected STREAM=ADDRESS, got `{value}`"))?;
+    if stream.is_empty() {
+        return Err(format!("route `{value}` has an empty stream ID"));
+    }
+    let address = address
+        .parse::<SocketAddr>()
+        .map_err(|error| format!("route `{value}`: invalid address: {error}"))?;
+    Ok((stream.to_owned(), address))
+}
+
+/// Destinations for one stream: its routes when it has any, otherwise every `--target`.
+fn destinations_for<'a>(
+    stream_id: &str,
+    targets: &'a [SocketAddr],
+    routes: &'a [(String, SocketAddr)],
+) -> Vec<&'a SocketAddr> {
+    let matched: Vec<&SocketAddr> = routes
+        .iter()
+        .filter(|(stream, _)| stream == stream_id)
+        .map(|(_, address)| address)
+        .collect();
+    if matched.is_empty() {
+        targets.iter().collect()
+    } else {
+        matched
+    }
+}
+
 /// Replay a recording with its recorded timing.
 ///
-/// Two things beyond the original:
+/// Three things beyond the original:
 /// - `targets` may hold MORE THAN ONE destination: every datagram is sent to each of them, so one recording
 ///   fans out to many receivers and they all see the same frame at the same moment.
 /// - `repeat` replays the recording until the process is stopped, instead of ending after one pass.
+/// - `routes` send each listed stream only to its own destinations (see [`destinations_for`]); a
+///   stream with neither a route nor any target is skipped.
 ///
 /// The timing model is the original one, unchanged: walk the records in order, sleeping the gap between
 /// consecutive recorded offsets before each send. A repeated pass restarts from the first record; because a
@@ -240,17 +281,28 @@ async fn send_control(address: SocketAddr, command: &str) -> Result<String, CliE
 async fn replay(
     file: &std::path::Path,
     targets: &[SocketAddr],
+    routes: &[(String, SocketAddr)],
     repeat: bool,
 ) -> Result<(), CliError> {
     let (metadata, records) = read_all(file)?;
 
-    // One socket serves every target, so bind the address family the targets share. A list that mixes
+    // One socket serves every destination, so bind the address family they share. A list that mixes
     // families is rejected rather than silently sending to only part of it.
-    let first_is_v4 = targets[0].is_ipv4();
-    if targets.iter().any(|target| target.is_ipv4() != first_is_v4) {
+    let all: Vec<&SocketAddr> = targets
+        .iter()
+        .chain(routes.iter().map(|(_, address)| address))
+        .collect();
+    let Some(first) = all.first() else {
         return Err(CliError::ReplayIo(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "all --target addresses must use the same address family",
+            "pass at least one --target or --route",
+        )));
+    };
+    let first_is_v4 = first.is_ipv4();
+    if all.iter().any(|address| address.is_ipv4() != first_is_v4) {
+        return Err(CliError::ReplayIo(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "all --target and --route addresses must use the same address family",
         )));
     }
     let socket = UdpSocket::bind(if first_is_v4 { "0.0.0.0:0" } else { "[::]:0" })
@@ -260,28 +312,44 @@ async fn replay(
     let destinations = targets
         .iter()
         .map(ToString::to_string)
+        .chain(
+            routes
+                .iter()
+                .map(|(stream, address)| format!("{stream}={address}")),
+        )
         .collect::<Vec<_>>()
         .join(", ");
     println!(
-        "Replaying {} datagrams from {} to {} target(s): {} (recording start Unix ns: {})",
+        "Replaying {} datagrams from {} to {} destination(s): {} (recording start Unix ns: {})",
         records.len(),
         file.display(),
-        targets.len(),
+        all.len(),
         destinations,
         metadata.start_unix_ns
     );
+    let mut streams: Vec<&str> = records
+        .iter()
+        .map(|record| record.stream_id.as_str())
+        .collect();
+    streams.sort_unstable();
+    streams.dedup();
+    for stream in streams {
+        if destinations_for(stream, targets, routes).is_empty() {
+            println!("Skipping stream `{stream}`: no --route for it and no --target");
+        }
+    }
 
     let mut pass = 0u64;
     loop {
         pass += 1;
         let mut previous = records.first().map_or(0, |record| record.offset_ns);
         for record in &records {
-            // Sleep the recorded gap ONCE, then hand the same datagram to every target.
+            // Sleep the recorded gap ONCE, then hand the same datagram to every destination.
             let delay = replay_delay(previous, record.offset_ns);
             if delay > Duration::ZERO {
                 sleep(delay).await;
             }
-            for target in targets {
+            for target in destinations_for(&record.stream_id, targets, routes) {
                 socket
                     .send_to(&record.payload, target)
                     .await
@@ -293,16 +361,11 @@ async fn replay(
             break;
         }
         println!(
-            "Replay pass {pass} complete: {} datagrams x {} target(s); looping",
-            records.len(),
-            targets.len()
+            "Replay pass {pass} complete: {} datagrams; looping",
+            records.len()
         );
     }
 
-    println!(
-        "Replay complete: {} datagrams x {} target(s)",
-        records.len(),
-        targets.len()
-    );
+    println!("Replay complete: {} datagrams", records.len());
     Ok(())
 }
