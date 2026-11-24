@@ -60,6 +60,7 @@ jobs:
           cp target/release/osc-toolkit.exe dist/
           cp -r examples dist/
           cp README.md dist/
+          cp LICENSE dist/
           ( cd dist && 7z a "../${name}.zip" . >/dev/null )
           sum="$(sha256sum "${name}.zip" | cut -d' ' -f1 | tr '[:lower:]' '[:upper:]')"
           printf '%s  %s\n' "${sum}" "${name}.zip" > "${name}.zip.sha256"
