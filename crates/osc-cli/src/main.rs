@@ -168,7 +168,7 @@ async fn handle_control(
         return Ok(false);
     };
     let line = line.trim();
-    let (command, argument) = line.split_once(' ').map_or((line, ""), |parts| parts);
+    let (command, argument) = line.split_once(' ').unwrap_or((line, ""));
     let (response, shutdown) = match command.to_ascii_uppercase().as_str() {
         "START" if !argument.trim().is_empty() => match recorder.start(argument.trim()) {
             Ok(()) => (format!("RECORDING file={}", argument.trim()), false),

@@ -43,7 +43,7 @@ to = "target"
         String::from_utf8(output.stdout).expect("stdout should be UTF-8"),
         "Configuration is valid: 1 inputs, 1 outputs, 1 mappings\n"
     );
-    assert!(output.stderr.is_empty());
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
 }
 
 #[test]
@@ -58,7 +58,7 @@ fn validate_command_rejects_invalid_configuration() {
     let _ = fs::remove_file(path);
 
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
     assert!(
         String::from_utf8(output.stderr)
             .expect("stderr should be UTF-8")
