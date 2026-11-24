@@ -14,7 +14,8 @@ Available in 0.2.0 (Windows x86_64 builds on the
 - `record start | stop | status | shutdown`: control recording on a running
   `serve` without restarting its listeners.
 - `replay`: replay a recording with its recorded timing, to one or more
-  `--target`s (fan-out), optionally with `--loop`.
+  `--target`s (fan-out), optionally with `--loop`. `--route STREAM=ADDRESS`
+  (repeatable) sends each recorded stream back to its own receiver.
 - Recordings use the crash-recoverable [binary format](docs/specs/recording-format.md)
   (`OSCTKREC`, CRC32C per datagram, no footer required).
 
@@ -23,6 +24,8 @@ osc-toolkit serve --config examples/vmc-passthrough.toml --control 127.0.0.1:701
 osc-toolkit record --control 127.0.0.1:7012 start --file take-001.oscr
 osc-toolkit record --control 127.0.0.1:7012 stop
 osc-toolkit replay --file take-001.oscr --target 127.0.0.1:39539
+osc-toolkit replay --file take-001.oscr \
+  --route vmc-port-39539=127.0.0.1:39539 --route vmc-port-39540=127.0.0.1:39540
 ```
 
 The project is early. Status per capability is tracked in the [Roadmap](ROADMAP.md).
