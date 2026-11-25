@@ -462,7 +462,7 @@ async fn run_input(input: &PreparedInput, shutdown: &mut watch::Receiver<bool>) 
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{net::SocketAddr, time::Duration};
 
     use osc_config::parse_and_validate;
     use osc_recording::{Record, read_all};
@@ -661,7 +661,7 @@ mod tests {
             record(2_000, "stranger", b"s1"),
             record(3_000, "alice", b"a2"),
         ];
-        assert!(topology.targets("stranger").is_empty());
+        assert_eq!(topology.targets("stranger"), Vec::<SocketAddr>::new());
 
         let sent = replay(&records, None, &topology, false)
             .await
@@ -679,7 +679,7 @@ mod tests {
             .await
             .expect("replay should run");
         assert_eq!(receive_all(&alice_out).await.len(), 2);
-        assert!(receive_all(&bob_out).await.is_empty());
+        assert_eq!(receive_all(&bob_out).await, Vec::<Vec<u8>>::new());
     }
 
     #[tokio::test]
