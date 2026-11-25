@@ -6,12 +6,13 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use osc_config::ValidatedConfig;
-use osc_recording::Writer;
+use osc_recording::{Record, ReplayCursor, Writer};
 use thiserror::Error;
-use tokio::{net::UdpSocket, sync::watch, task::JoinSet};
+use tokio::{net::UdpSocket, sync::watch, task::JoinSet, time::sleep};
 
 /// Maximum UDP payload accepted by the runtime.
 pub const MAX_DATAGRAM_SIZE: usize = 65_507;
@@ -62,6 +63,16 @@ pub enum RuntimeError {
     InputTask {
         /// Input identifier.
         input: String,
+        /// Underlying socket error.
+        source: io::Error,
+    },
+    /// Sending a replayed datagram failed.
+    #[error("replay of stream `{stream}` to {target} failed: {source}")]
+    Replay {
+        /// Recorded stream identifier.
+        stream: String,
+        /// Destination address.
+        target: SocketAddr,
         /// Underlying socket error.
         source: io::Error,
     },
@@ -154,6 +165,157 @@ struct Destination {
     target: SocketAddr,
 }
 
+/// Creates one socket for an output, in the target's address family.
+async fn bind_output(id: &str, target: SocketAddr) -> Result<Arc<UdpSocket>, RuntimeError> {
+    let bind_address = if target.is_ipv4() {
+        "0.0.0.0:0"
+    } else {
+        "[::]:0"
+    };
+    let socket =
+        UdpSocket::bind(bind_address)
+            .await
+            .map_err(|source| RuntimeError::CreateOutput {
+                output: id.to_owned(),
+                target,
+                source,
+            })?;
+    Ok(Arc::new(socket))
+}
+
+/// Compiles the mapping edges into per-input destination lists (indexed like
+/// [`ValidatedConfig::inputs`]). Live routing and replay both use this, so a
+/// recording replays through exactly the topology that serves live traffic.
+async fn compile_destinations(
+    config: &ValidatedConfig,
+) -> Result<Vec<Vec<Destination>>, RuntimeError> {
+    let mut output_sockets = Vec::with_capacity(config.outputs.len());
+    for output in &config.outputs {
+        output_sockets.push(bind_output(output.id.as_str(), output.target).await?);
+    }
+    let mut destinations_by_input: Vec<Vec<Destination>> =
+        (0..config.inputs.len()).map(|_| Vec::new()).collect();
+    for mapping in &config.mappings {
+        let output = &config.outputs[mapping.output_index];
+        destinations_by_input[mapping.input_index].push(Destination {
+            socket: Arc::clone(&output_sockets[mapping.output_index]),
+            target: output.target,
+        });
+    }
+    Ok(destinations_by_input)
+}
+
+/// Where each recorded stream goes during replay.
+///
+/// A recording's stream identifiers are the identifiers of the inputs it was
+/// recorded from, so [`ReplayTopology::from_config`] restores the original
+/// routing: each stream is sent through its input's mapping edges.
+/// [`ReplayTopology::fan_out`] instead sends every stream to every target.
+pub struct ReplayTopology {
+    /// Mapping restoration: input (stream) identifier and its destinations.
+    mapped: Vec<(String, Vec<Destination>)>,
+    /// Fan-out: destinations shared by every stream.
+    every_stream: Vec<Destination>,
+}
+
+impl ReplayTopology {
+    /// Restores the mapping edges of `config`. Input sockets are not bound:
+    /// recorded datagrams take the place of received ones.
+    ///
+    /// # Errors
+    /// Returns an error if an output socket cannot be created.
+    pub async fn from_config(config: &ValidatedConfig) -> Result<Self, RuntimeError> {
+        let destinations = compile_destinations(config).await?;
+        let mapped = config
+            .inputs
+            .iter()
+            .zip(destinations)
+            .map(|(input, destinations)| (input.id.to_string(), destinations))
+            .collect();
+        Ok(Self {
+            mapped,
+            every_stream: Vec::new(),
+        })
+    }
+
+    /// Sends every replayed stream to each of `targets`.
+    ///
+    /// # Errors
+    /// Returns an error if a socket cannot be created.
+    pub async fn fan_out(targets: &[SocketAddr]) -> Result<Self, RuntimeError> {
+        let mut every_stream = Vec::with_capacity(targets.len());
+        for target in targets {
+            every_stream.push(Destination {
+                socket: bind_output(&target.to_string(), *target).await?,
+                target: *target,
+            });
+        }
+        Ok(Self {
+            mapped: Vec::new(),
+            every_stream,
+        })
+    }
+
+    fn destinations(&self, stream_id: &str) -> &[Destination] {
+        if !self.every_stream.is_empty() {
+            return &self.every_stream;
+        }
+        self.mapped
+            .iter()
+            .find(|(input, _)| input == stream_id)
+            .map_or(&[], |(_, destinations)| destinations.as_slice())
+    }
+
+    /// Destination addresses of a stream; empty when it is not routed.
+    #[must_use]
+    pub fn targets(&self, stream_id: &str) -> Vec<SocketAddr> {
+        self.destinations(stream_id)
+            .iter()
+            .map(|destination| destination.target)
+            .collect()
+    }
+}
+
+/// Replays `records` with their recorded timing through `topology`.
+///
+/// Only the streams in `selection` are replayed when it is given (see
+/// [`ReplayCursor`]). Streams without a destination are skipped. With
+/// `repeat`, passes continue until the future is dropped. Returns the number
+/// of datagrams sent.
+///
+/// # Errors
+/// Returns an error when a send fails.
+pub async fn replay(
+    records: &[Record],
+    selection: Option<&[String]>,
+    topology: &ReplayTopology,
+    repeat: bool,
+) -> Result<u64, RuntimeError> {
+    let mut sent = 0_u64;
+    loop {
+        for (delay, record) in ReplayCursor::new(records, selection) {
+            if delay > Duration::ZERO {
+                sleep(delay).await;
+            }
+            for destination in topology.destinations(&record.stream_id) {
+                destination
+                    .socket
+                    .send_to(&record.payload, destination.target)
+                    .await
+                    .map_err(|source| RuntimeError::Replay {
+                        stream: record.stream_id.clone(),
+                        target: destination.target,
+                        source,
+                    })?;
+                sent += 1;
+            }
+        }
+        if !repeat {
+            return Ok(sent);
+        }
+    }
+}
+
 impl Runtime {
     /// Creates every input and output socket transactionally.
     ///
@@ -183,32 +345,7 @@ impl Runtime {
             return Err(RuntimeError::NoInputs);
         }
 
-        let mut output_sockets = Vec::with_capacity(config.outputs.len());
-        for output in &config.outputs {
-            let bind_address = if output.target.is_ipv4() {
-                "0.0.0.0:0"
-            } else {
-                "[::]:0"
-            };
-            let socket = UdpSocket::bind(bind_address).await.map_err(|source| {
-                RuntimeError::CreateOutput {
-                    output: output.id.to_string(),
-                    target: output.target,
-                    source,
-                }
-            })?;
-            output_sockets.push(Arc::new(socket));
-        }
-
-        let mut destinations_by_input: Vec<Vec<Destination>> =
-            (0..config.inputs.len()).map(|_| Vec::new()).collect();
-        for mapping in &config.mappings {
-            let output = &config.outputs[mapping.output_index];
-            destinations_by_input[mapping.input_index].push(Destination {
-                socket: Arc::clone(&output_sockets[mapping.output_index]),
-                target: output.target,
-            });
-        }
+        let destinations_by_input = compile_destinations(&config).await?;
 
         let mut inputs = Vec::with_capacity(config.inputs.len());
         for (input, destinations) in config.inputs.iter().zip(destinations_by_input) {
@@ -328,10 +465,10 @@ mod tests {
     use std::time::Duration;
 
     use osc_config::parse_and_validate;
-    use osc_recording::read_all;
+    use osc_recording::{Record, read_all};
     use tokio::{net::UdpSocket, sync::oneshot, time::timeout};
 
-    use super::{Runtime, RuntimeError};
+    use super::{ReplayTopology, Runtime, RuntimeError, replay};
 
     async fn free_address() -> std::net::SocketAddr {
         let socket = UdpSocket::bind("127.0.0.1:0")
@@ -474,6 +611,100 @@ mod tests {
         task.await
             .expect("runtime task should not panic")
             .expect("runtime should stop cleanly");
+    }
+
+    fn record(offset_ns: u64, stream: &str, payload: &[u8]) -> Record {
+        Record {
+            offset_ns,
+            stream_id: stream.to_owned(),
+            payload: payload.to_vec(),
+        }
+    }
+
+    async fn receive_all(socket: &UdpSocket) -> Vec<Vec<u8>> {
+        let mut got = Vec::new();
+        let mut buffer = [0_u8; 64];
+        while let Ok(Ok(length)) =
+            tokio::time::timeout(Duration::from_millis(200), socket.recv(&mut buffer)).await
+        {
+            got.push(buffer[..length].to_vec());
+        }
+        got
+    }
+
+    #[tokio::test]
+    async fn replay_restores_each_streams_mapping() {
+        let alice_out = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+        let bob_out = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+        let both_out = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+        let config = parse_and_validate(&format!(
+            "version = 1\n\
+             [[inputs]]\nid = \"alice\"\nbind = \"127.0.0.1:0\"\n\
+             [[inputs]]\nid = \"bob\"\nbind = \"127.0.0.1:0\"\n\
+             [[outputs]]\nid = \"a\"\ntarget = \"{}\"\n\
+             [[outputs]]\nid = \"b\"\ntarget = \"{}\"\n\
+             [[outputs]]\nid = \"monitor\"\ntarget = \"{}\"\n\
+             [[mappings]]\nid = \"alice-a\"\nfrom = \"alice\"\nto = \"a\"\n\
+             [[mappings]]\nid = \"bob-b\"\nfrom = \"bob\"\nto = \"b\"\n\
+             [[mappings]]\nid = \"bob-monitor\"\nfrom = \"bob\"\nto = \"monitor\"\n",
+            alice_out.local_addr().expect("addr"),
+            bob_out.local_addr().expect("addr"),
+            both_out.local_addr().expect("addr"),
+        ))
+        .expect("config should validate");
+        let topology = ReplayTopology::from_config(&config)
+            .await
+            .expect("topology should prepare");
+        let records = vec![
+            record(0, "alice", b"a1"),
+            record(1_000, "bob", b"b1"),
+            record(2_000, "stranger", b"s1"),
+            record(3_000, "alice", b"a2"),
+        ];
+        assert!(topology.targets("stranger").is_empty());
+
+        let sent = replay(&records, None, &topology, false)
+            .await
+            .expect("replay should run");
+        assert_eq!(sent, 4); // a1, b1 x2 (b + monitor), a2; stranger skipped
+        assert_eq!(
+            receive_all(&alice_out).await,
+            vec![b"a1".to_vec(), b"a2".to_vec()]
+        );
+        assert_eq!(receive_all(&bob_out).await, vec![b"b1".to_vec()]);
+        assert_eq!(receive_all(&both_out).await, vec![b"b1".to_vec()]);
+
+        let only_alice = ["alice".to_owned()];
+        replay(&records, Some(&only_alice), &topology, false)
+            .await
+            .expect("replay should run");
+        assert_eq!(receive_all(&alice_out).await.len(), 2);
+        assert!(receive_all(&bob_out).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fan_out_sends_every_stream_to_every_target() {
+        let first = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+        let second = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+        let topology = ReplayTopology::fan_out(&[
+            first.local_addr().expect("addr"),
+            second.local_addr().expect("addr"),
+        ])
+        .await
+        .expect("topology should prepare");
+        let records = vec![record(0, "x", b"x1"), record(10, "y", b"y1")];
+        assert_eq!(
+            replay(&records, None, &topology, false)
+                .await
+                .expect("replay should run"),
+            4
+        );
+        for socket in [&first, &second] {
+            assert_eq!(
+                receive_all(socket).await,
+                vec![b"x1".to_vec(), b"y1".to_vec()]
+            );
+        }
     }
 
     #[tokio::test]

@@ -1,0 +1,28 @@
+# Replays a take recorded with vmc-record-two-ports.toml, keeping each port's
+# stream separate:
+#   osc-toolkit replay --file take-001.oscr --config examples/vmc-replay-two-ports.toml
+# The inputs are the recording's stream IDs. Replay does not bind them, so the
+# same file can also run live with `serve`.
+version = 1
+
+[[inputs]]
+id = "vmc-port-39539"
+bind = "0.0.0.0:39539"
+
+[[inputs]]
+id = "vmc-port-39540"
+bind = "0.0.0.0:39540"
+
+[[outputs]]
+id = "performer-a"
+target = "127.0.0.1:49539"
+
+[[outputs]]
+id = "performer-b"
+target = "127.0.0.1:49540"
+
+[[mapping_groups]]
+id = "each-port-to-its-receiver"
+from = ["vmc-port-39539", "vmc-port-39540"]
+to = ["performer-a", "performer-b"]
+mode = "zip"

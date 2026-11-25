@@ -51,7 +51,15 @@ An incomplete final prefix, body, or CRC mismatch is a damaged tail. Recovery re
 
 ## Replay
 
-Timed replay uses monotonic offsets relative to the first selected record. Wall-clock time is never used for packet scheduling. The initial CLI replays all streams to one explicitly supplied UDP target at 1x speed. Later range, speed, stream-selection, and mapping restoration features must preserve file order for equal timestamps.
+Timed replay uses monotonic offsets relative to the first selected record. Wall-clock time is never used for packet scheduling. Records with equal offsets keep file order. The replay cursor (`osc_recording::ReplayCursor`) implements these rules for every replay path.
+
+A stream identifier is the input it was recorded from, so streams stay separate on replay:
+
+- **Mapping restoration** (`replay --config`): each stream is sent through the mapping edges of the input with the same identifier, using the same topology compilation as live routing. Inputs are not bound. A stream with no matching input or no edge is skipped and reported.
+- **Stream selection** (`replay --stream`, repeatable): only the listed streams are replayed. Naming a stream the file does not contain is an error.
+- **Explicit targets** (`replay --target`, repeatable): every selected datagram goes to every target. Sending more than one stream this way merges them, so it is refused unless `--merge-streams` is given.
+
+Range and speed are not implemented yet.
 
 ## Compatibility
 
