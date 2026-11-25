@@ -1,14 +1,13 @@
-use std::{net::SocketAddr, path::PathBuf, process::ExitCode, time::Duration};
+use std::{net::SocketAddr, path::PathBuf, process::ExitCode};
 
 use clap::{Parser, Subcommand};
 use osc_config::load_and_validate;
-use osc_recording::{read_all, replay_delay};
-use osc_runtime::{RecordingController, RecordingStatus, Runtime};
+use osc_recording::{read_all, stream_ids};
+use osc_runtime::{RecordingController, RecordingStatus, ReplayTopology, Runtime};
 use thiserror::Error;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::{TcpListener, TcpStream, UdpSocket},
-    time::sleep,
+    net::{TcpListener, TcpStream},
 };
 
 #[derive(Debug, Parser)]
@@ -47,16 +46,26 @@ enum Command {
     Replay {
         #[arg(short, long)]
         file: PathBuf,
-        /// Destination(s). Pass more than once to send EVERY datagram to EACH target - one
-        /// recording fans out to many receivers with the recorded timing preserved. With
-        /// `--route`, targets receive only the streams that have no route.
-        #[arg(short, long, required_unless_present = "route")]
+        /// Restore the recording's routing from a configuration: each recorded stream is the
+        /// input it was recorded from, and is sent through that input's mappings to its
+        /// outputs. Input sockets are not bound.
+        #[arg(
+            short,
+            long,
+            conflicts_with = "target",
+            required_unless_present = "target"
+        )]
+        config: Option<PathBuf>,
+        /// Send the selected stream(s) to these destination(s), each datagram to every target.
+        /// More than one selected stream also needs `--merge-streams`.
+        #[arg(short, long)]
         target: Vec<SocketAddr>,
-        /// Per-stream destination as `STREAM=ADDRESS` (repeatable; a stream may have several).
-        /// Datagrams of a routed stream go only to its routes, so streams recorded from
-        /// different ports can be replayed back to different receivers.
-        #[arg(long, value_parser = parse_route)]
-        route: Vec<(String, SocketAddr)>,
+        /// Replay only this recorded stream (repeatable). Default: every stream.
+        #[arg(long)]
+        stream: Vec<String>,
+        /// Allow `--target` to receive several streams interleaved on the same address.
+        #[arg(long, default_value_t = false, requires = "target")]
+        merge_streams: bool,
         /// Repeat the recording until stopped, instead of ending after one pass.
         #[arg(long, default_value_t = false)]
         r#loop: bool,
@@ -90,8 +99,8 @@ enum CliError {
     ControlIo(std::io::Error),
     #[error("control service rejected the command: {0}")]
     ControlRejected(String),
-    #[error("replay UDP operation failed: {0}")]
-    ReplayIo(std::io::Error),
+    #[error("{0}")]
+    Replay(String),
 }
 
 #[tokio::main]
@@ -128,10 +137,21 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         }
         Command::Replay {
             file,
+            config,
             target,
-            route,
+            stream,
+            merge_streams,
             r#loop,
-        } => replay(&file, &target, &route, r#loop).await?,
+        } => {
+            let destination = match config {
+                Some(config) => ReplayDestination::Config(config),
+                None => ReplayDestination::Targets {
+                    targets: target,
+                    merge_streams,
+                },
+            };
+            replay(&file, &destination, &stream, r#loop).await?;
+        }
     }
     Ok(())
 }
@@ -233,139 +253,99 @@ async fn send_control(address: SocketAddr, command: &str) -> Result<String, CliE
     Ok(response)
 }
 
-/// Parses `STREAM=ADDRESS`. The split is at the LAST `=`, so stream IDs may contain `=`.
-fn parse_route(value: &str) -> Result<(String, SocketAddr), String> {
-    let (stream, address) = value
-        .rsplit_once('=')
-        .ok_or_else(|| format!("expected STREAM=ADDRESS, got `{value}`"))?;
-    if stream.is_empty() {
-        return Err(format!("route `{value}` has an empty stream ID"));
-    }
-    let address = address
-        .parse::<SocketAddr>()
-        .map_err(|error| format!("route `{value}`: invalid address: {error}"))?;
-    Ok((stream.to_owned(), address))
+/// Where a replay sends its streams.
+enum ReplayDestination {
+    /// Restore the mappings of this configuration file.
+    Config(PathBuf),
+    /// Send the selected streams to every target.
+    Targets {
+        targets: Vec<SocketAddr>,
+        merge_streams: bool,
+    },
 }
 
-/// Destinations for one stream: its routes when it has any, otherwise every `--target`.
-fn destinations_for<'a>(
-    stream_id: &str,
-    targets: &'a [SocketAddr],
-    routes: &'a [(String, SocketAddr)],
-) -> Vec<&'a SocketAddr> {
-    let matched: Vec<&SocketAddr> = routes
-        .iter()
-        .filter(|(stream, _)| stream == stream_id)
-        .map(|(_, address)| address)
-        .collect();
-    if matched.is_empty() {
-        targets.iter().collect()
-    } else {
-        matched
-    }
-}
-
-/// Replay a recording with its recorded timing.
+/// Replays a recording with its recorded timing (see `osc_runtime::replay`).
 ///
-/// Three things beyond the original:
-/// - `targets` may hold MORE THAN ONE destination: every datagram is sent to each of them, so one recording
-///   fans out to many receivers and they all see the same frame at the same moment.
-/// - `repeat` replays the recording until the process is stopped, instead of ending after one pass.
-/// - `routes` send each listed stream only to its own destinations (see [`destinations_for`]); a
-///   stream with neither a route nor any target is skipped.
-///
-/// The timing model is the original one, unchanged: walk the records in order, sleeping the gap between
-/// consecutive recorded offsets before each send. A repeated pass restarts from the first record; because a
-/// pass has already slept the recording's own span (first offset to last offset), restarting reproduces the
-/// recorded cadence without inventing a trailing hold.
+/// Streams are never merged silently: replaying more than one stream to bare `--target`
+/// addresses is refused unless `--merge-streams` is given, because each stream was
+/// recorded from its own input and receivers usually tell them apart by port.
 async fn replay(
     file: &std::path::Path,
-    targets: &[SocketAddr],
-    routes: &[(String, SocketAddr)],
+    destination: &ReplayDestination,
+    selection: &[String],
     repeat: bool,
 ) -> Result<(), CliError> {
     let (metadata, records) = read_all(file)?;
-
-    // One socket serves every destination, so bind the address family they share. A list that mixes
-    // families is rejected rather than silently sending to only part of it.
-    let all: Vec<&SocketAddr> = targets
+    let recorded = stream_ids(&records);
+    if let Some(unknown) = selection
         .iter()
-        .chain(routes.iter().map(|(_, address)| address))
-        .collect();
-    let Some(first) = all.first() else {
-        return Err(CliError::ReplayIo(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "pass at least one --target or --route",
-        )));
-    };
-    let first_is_v4 = first.is_ipv4();
-    if all.iter().any(|address| address.is_ipv4() != first_is_v4) {
-        return Err(CliError::ReplayIo(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "all --target and --route addresses must use the same address family",
+        .find(|stream| !recorded.contains(&stream.as_str()))
+    {
+        return Err(CliError::Replay(format!(
+            "--stream `{unknown}` is not in the recording (streams: {})",
+            recorded.join(", ")
         )));
     }
-    let socket = UdpSocket::bind(if first_is_v4 { "0.0.0.0:0" } else { "[::]:0" })
-        .await
-        .map_err(CliError::ReplayIo)?;
+    let selected: Vec<&str> = if selection.is_empty() {
+        recorded.clone()
+    } else {
+        recorded
+            .iter()
+            .copied()
+            .filter(|stream| selection.iter().any(|wanted| wanted == stream))
+            .collect()
+    };
 
-    let destinations = targets
-        .iter()
-        .map(ToString::to_string)
-        .chain(
-            routes
-                .iter()
-                .map(|(stream, address)| format!("{stream}={address}")),
-        )
-        .collect::<Vec<_>>()
-        .join(", ");
+    let topology = match destination {
+        ReplayDestination::Config(path) => {
+            ReplayTopology::from_config(&load_and_validate(path)?).await?
+        }
+        ReplayDestination::Targets {
+            targets,
+            merge_streams,
+        } => {
+            if selected.len() > 1 && !merge_streams {
+                return Err(CliError::Replay(format!(
+                    "the recording has {} streams ({}); sending them all to --target would merge \
+                     them. Use --config to restore each stream's routing, --stream to pick one, \
+                     or --merge-streams to merge on purpose",
+                    selected.len(),
+                    selected.join(", ")
+                )));
+            }
+            ReplayTopology::fan_out(targets).await?
+        }
+    };
+
     println!(
-        "Replaying {} datagrams from {} to {} destination(s): {} (recording start Unix ns: {})",
-        records.len(),
+        "Replaying {} from {} (recording start Unix ns: {})",
+        if selection.is_empty() {
+            "all streams".to_owned()
+        } else {
+            format!("streams {}", selected.join(", "))
+        },
         file.display(),
-        all.len(),
-        destinations,
         metadata.start_unix_ns
     );
-    let mut streams: Vec<&str> = records
-        .iter()
-        .map(|record| record.stream_id.as_str())
-        .collect();
-    streams.sort_unstable();
-    streams.dedup();
-    for stream in streams {
-        if destinations_for(stream, targets, routes).is_empty() {
-            println!("Skipping stream `{stream}`: no --route for it and no --target");
+    let mut routed = 0;
+    for stream in &selected {
+        let targets = topology.targets(stream);
+        if targets.is_empty() {
+            println!("  {stream}: skipped (no mapping)");
+        } else {
+            routed += 1;
+            let targets: Vec<String> = targets.iter().map(ToString::to_string).collect();
+            println!("  {stream} -> {}", targets.join(", "));
         }
     }
-
-    let mut pass = 0u64;
-    loop {
-        pass += 1;
-        let mut previous = records.first().map_or(0, |record| record.offset_ns);
-        for record in &records {
-            // Sleep the recorded gap ONCE, then hand the same datagram to every destination.
-            let delay = replay_delay(previous, record.offset_ns);
-            if delay > Duration::ZERO {
-                sleep(delay).await;
-            }
-            for target in destinations_for(&record.stream_id, targets, routes) {
-                socket
-                    .send_to(&record.payload, target)
-                    .await
-                    .map_err(CliError::ReplayIo)?;
-            }
-            previous = record.offset_ns;
-        }
-        if !repeat {
-            break;
-        }
-        println!(
-            "Replay pass {pass} complete: {} datagrams; looping",
-            records.len()
-        );
+    if routed == 0 {
+        return Err(CliError::Replay(
+            "no selected stream has a destination".to_owned(),
+        ));
     }
 
-    println!("Replay complete: {} datagrams", records.len());
+    let selection = (!selection.is_empty()).then_some(selection);
+    let sent = osc_runtime::replay(&records, selection, &topology, repeat).await?;
+    println!("Replay complete: {sent} datagrams sent");
     Ok(())
 }

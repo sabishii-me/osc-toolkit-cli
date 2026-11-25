@@ -309,14 +309,129 @@ pub fn replay_delay(previous_ns: u64, current_ns: u64) -> Duration {
     Duration::from_nanos(current_ns.saturating_sub(previous_ns))
 }
 
+/// Stream identifiers in order of first appearance in `records`.
+#[must_use]
+pub fn stream_ids(records: &[Record]) -> Vec<&str> {
+    let mut seen: Vec<&str> = Vec::new();
+    for record in records {
+        if !seen.contains(&record.stream_id.as_str()) {
+            seen.push(&record.stream_id);
+        }
+    }
+    seen
+}
+
+/// Walks the selected records of a recording in file order and yields each
+/// one with the delay to wait before sending it.
+///
+/// Timing follows the recording format's replay rules: offsets are monotonic
+/// and relative to the first *selected* record, so the first yielded record
+/// has no delay, and records with equal offsets keep their file order.
+/// A cursor covers one pass; repeating a replay starts a new cursor.
+#[derive(Clone, Debug)]
+pub struct ReplayCursor<'a> {
+    records: &'a [Record],
+    selection: Option<&'a [String]>,
+    position: usize,
+    previous_ns: Option<u64>,
+}
+
+impl<'a> ReplayCursor<'a> {
+    /// Creates a cursor over `records`. `selection` limits replay to the
+    /// listed stream identifiers; `None` selects every stream.
+    #[must_use]
+    pub fn new(records: &'a [Record], selection: Option<&'a [String]>) -> Self {
+        Self {
+            records,
+            selection,
+            position: 0,
+            previous_ns: None,
+        }
+    }
+
+    fn selected(&self, record: &Record) -> bool {
+        self.selection
+            .is_none_or(|streams| streams.contains(&record.stream_id))
+    }
+}
+
+impl<'a> Iterator for ReplayCursor<'a> {
+    type Item = (Duration, &'a Record);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(record) = self.records.get(self.position) {
+            self.position += 1;
+            if !self.selected(record) {
+                continue;
+            }
+            let delay = self.previous_ns.map_or(Duration::ZERO, |previous| {
+                replay_delay(previous, record.offset_ns)
+            });
+            self.previous_ns = Some(record.offset_ns);
+            return Some((delay, record));
+        }
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs, io::Write};
 
-    use super::{RecordingError, Writer, read_all, replay_delay};
+    use std::time::Duration;
+
+    use super::{Record, RecordingError, ReplayCursor, Writer, read_all, replay_delay, stream_ids};
 
     fn path(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("osc-recording-{}-{name}", std::process::id()))
+    }
+
+    #[test]
+    fn cursor_times_selected_records_from_the_first_selected_one() {
+        let record = |offset_ns, stream: &str, payload: &[u8]| Record {
+            offset_ns,
+            stream_id: stream.to_owned(),
+            payload: payload.to_vec(),
+        };
+        let records = vec![
+            record(0, "a", b"a0"),
+            record(10, "b", b"b10"),
+            record(20, "a", b"a20"),
+            record(20, "b", b"b20"),
+            record(35, "a", b"a35"),
+        ];
+        assert_eq!(stream_ids(&records), vec!["a", "b"]);
+
+        let all: Vec<(u128, &[u8])> = ReplayCursor::new(&records, None)
+            .map(|(delay, record)| (delay.as_nanos(), record.payload.as_slice()))
+            .collect();
+        // Equal offsets keep file order and get no extra delay.
+        assert_eq!(
+            all,
+            vec![
+                (0, &b"a0"[..]),
+                (10, b"b10"),
+                (10, b"a20"),
+                (0, b"b20"),
+                (15, b"a35")
+            ]
+        );
+
+        let only_b = ["b".to_owned()];
+        let b: Vec<(Duration, &[u8])> = ReplayCursor::new(&records, Some(&only_b))
+            .map(|(delay, record)| (delay, record.payload.as_slice()))
+            .collect();
+        // The first selected record starts immediately, not 10 ns in.
+        assert_eq!(
+            b,
+            vec![
+                (Duration::ZERO, &b"b10"[..]),
+                (Duration::from_nanos(10), b"b20")
+            ]
+        );
+
+        let none = ["missing".to_owned()];
+        assert_eq!(ReplayCursor::new(&records, Some(&none)).count(), 0);
     }
 
     #[test]
