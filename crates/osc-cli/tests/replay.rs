@@ -147,7 +147,11 @@ fn replay_refuses_to_merge_streams_into_a_target() {
     assert!(!output.status.success());
     let error = String::from_utf8_lossy(&output.stderr);
     assert!(error.contains("3 streams (alice, bob, other)"), "{error}");
-    assert!(receive_all(&target).is_empty(), "nothing may be sent");
+    assert_eq!(
+        receive_all(&target),
+        Vec::<Vec<u8>>::new(),
+        "nothing may be sent"
+    );
 
     let merged = replay(&[
         "--file",
